@@ -1,10 +1,14 @@
+#include "config_core.h"
+
 namespace DB
 {
 
 class FunctionFactory;
 
 void registerFunctionCurrentDatabase(FunctionFactory &);
+void registerFunctionCurrentUser(FunctionFactory &);
 void registerFunctionHostName(FunctionFactory &);
+void registerFunctionFQDN(FunctionFactory &);
 void registerFunctionVisibleWidth(FunctionFactory &);
 void registerFunctionToTypeName(FunctionFactory &);
 void registerFunctionGetSizeOfEnumType(FunctionFactory &);
@@ -15,6 +19,7 @@ void registerFunctionBlockSize(FunctionFactory &);
 void registerFunctionBlockNumber(FunctionFactory &);
 void registerFunctionRowNumberInBlock(FunctionFactory &);
 void registerFunctionRowNumberInAllBlocks(FunctionFactory &);
+void registerFunctionNeighbor(FunctionFactory &);
 void registerFunctionSleep(FunctionFactory &);
 void registerFunctionSleepEachRow(FunctionFactory &);
 void registerFunctionMaterialize(FunctionFactory &);
@@ -45,11 +50,19 @@ void registerFunctionJoinGet(FunctionFactory &);
 void registerFunctionFilesystem(FunctionFactory &);
 void registerFunctionEvalMLMethod(FunctionFactory &);
 void registerFunctionBasename(FunctionFactory &);
+void registerFunctionTransform(FunctionFactory &);
+void registerFunctionGetMacro(FunctionFactory &);
+
+#if USE_ICU
+void registerFunctionConvertCharset(FunctionFactory &);
+#endif
 
 void registerFunctionsMiscellaneous(FunctionFactory & factory)
 {
     registerFunctionCurrentDatabase(factory);
+    registerFunctionCurrentUser(factory);
     registerFunctionHostName(factory);
+    registerFunctionFQDN(factory);
     registerFunctionVisibleWidth(factory);
     registerFunctionToTypeName(factory);
     registerFunctionGetSizeOfEnumType(factory);
@@ -60,6 +73,7 @@ void registerFunctionsMiscellaneous(FunctionFactory & factory)
     registerFunctionBlockNumber(factory);
     registerFunctionRowNumberInBlock(factory);
     registerFunctionRowNumberInAllBlocks(factory);
+    registerFunctionNeighbor(factory);
     registerFunctionSleep(factory);
     registerFunctionSleepEachRow(factory);
     registerFunctionMaterialize(factory);
@@ -90,6 +104,12 @@ void registerFunctionsMiscellaneous(FunctionFactory & factory)
     registerFunctionFilesystem(factory);
     registerFunctionEvalMLMethod(factory);
     registerFunctionBasename(factory);
+    registerFunctionTransform(factory);
+    registerFunctionGetMacro(factory);
+
+#if USE_ICU
+    registerFunctionConvertCharset(factory);
+#endif
 }
 
 }

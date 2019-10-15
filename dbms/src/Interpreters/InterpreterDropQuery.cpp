@@ -7,6 +7,7 @@
 #include <Parsers/ASTDropQuery.h>
 #include <Storages/IStorage.h>
 #include <Common/escapeForFileName.h>
+#include <Common/quoteString.h>
 #include <Common/typeid_cast.h>
 
 
@@ -80,7 +81,7 @@ BlockIO InterpreterDropQuery::executeToTable(String & database_name_, String & t
             /// If table was already dropped by anyone, an exception will be thrown
             auto table_lock = database_and_table.second->lockExclusively(context.getCurrentQueryId());
             /// Drop table data, don't touch metadata
-            database_and_table.second->truncate(query_ptr, context);
+            database_and_table.second->truncate(query_ptr, context, table_lock);
         }
         else if (kind == ASTDropQuery::Kind::Drop)
         {
@@ -90,11 +91,32 @@ BlockIO InterpreterDropQuery::executeToTable(String & database_name_, String & t
             /// If table was already dropped by anyone, an exception will be thrown
 
             auto table_lock = database_and_table.second->lockExclusively(context.getCurrentQueryId());
-            /// Delete table metadata and table itself from memory
 
+            const std::string metadata_file_without_extension =
+                database_and_table.first->getMetadataPath()
+                + escapeForFileName(database_and_table.second->getTableName());
+
+            const auto prev_metadata_name = metadata_file_without_extension + ".sql";
+            const auto drop_metadata_name = metadata_file_without_extension + ".sql.tmp_drop";
+
+            /// Try to rename metadata file and delete the data
+            try
+            {
+                /// There some kind of tables that have no metadata - ignore renaming
+                if (Poco::File(prev_metadata_name).exists())
+                    Poco::File(prev_metadata_name).renameTo(drop_metadata_name);
+                /// Delete table data
+                database_and_table.second->drop(table_lock);
+            }
+            catch (...)
+            {
+                if (Poco::File(drop_metadata_name).exists())
+                    Poco::File(drop_metadata_name).renameTo(prev_metadata_name);
+                throw;
+            }
+
+            /// Delete table metadata and table itself from memory
             database_and_table.first->removeTable(context, database_and_table.second->getTableName());
-            /// Delete table data
-            database_and_table.second->drop();
             database_and_table.second->is_dropped = true;
 
             String database_data_path = database_and_table.first->getDataPath();
@@ -128,7 +150,7 @@ BlockIO InterpreterDropQuery::executeToTemporaryTable(String & table_name, ASTDr
                 /// If table was already dropped by anyone, an exception will be thrown
                 auto table_lock = table->lockExclusively(context.getCurrentQueryId());
                 /// Drop table data, don't touch metadata
-                table->truncate(query_ptr, context);
+                table->truncate(query_ptr, context, table_lock);
             }
             else if (kind == ASTDropQuery::Kind::Drop)
             {
@@ -137,7 +159,7 @@ BlockIO InterpreterDropQuery::executeToTemporaryTable(String & table_name, ASTDr
                 /// If table was already dropped by anyone, an exception will be thrown
                 auto table_lock = table->lockExclusively(context.getCurrentQueryId());
                 /// Delete table data
-                table->drop();
+                table->drop(table_lock);
                 table->is_dropped = true;
             }
         }
@@ -165,7 +187,7 @@ BlockIO InterpreterDropQuery::executeToDatabase(String & database_name, ASTDropQ
         {
             for (auto iterator = database->getIterator(context); iterator->isValid(); iterator->next())
             {
-                String current_table_name = iterator->table()->getTableName();
+                String current_table_name = iterator->name();
                 executeToTable(database_name, current_table_name, kind, false, false, false);
             }
 

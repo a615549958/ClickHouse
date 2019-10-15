@@ -61,6 +61,10 @@ nav:
     - 'IPv4': 'data_types/domains/ipv4.md'
     - 'IPv6': 'data_types/domains/ipv6.md'
 
+- 'Database Engines':
+    - 'Introduction': 'database_engines/index.md'
+    - 'MySQL': 'database_engines/mysql.md'
+
 - 'Table Engines':
   - 'Introduction': 'operations/table_engines/index.md'
   - 'MergeTree Family':
@@ -81,6 +85,9 @@ nav:
   - 'Integrations':
     - 'Kafka': 'operations/table_engines/kafka.md'
     - 'MySQL': 'operations/table_engines/mysql.md'
+    - 'JDBC': 'operations/table_engines/jdbc.md'
+    - 'ODBC': 'operations/table_engines/odbc.md'
+    - 'HDFS': 'operations/table_engines/hdfs.md'
   - 'Special':
     - 'Distributed': 'operations/table_engines/distributed.md'
     - 'External data': 'operations/table_engines/external_data.md'
@@ -95,8 +102,6 @@ nav:
     - 'MaterializedView': 'operations/table_engines/materializedview.md'
     - 'Memory': 'operations/table_engines/memory.md'
     - 'Buffer': 'operations/table_engines/buffer.md'
-    - 'JDBC': 'operations/table_engines/jdbc.md'
-    - 'ODBC': 'operations/table_engines/odbc.md'
 
 - 'SQL Reference':
   - 'hidden': 'query_language/index.md'
@@ -104,6 +109,8 @@ nav:
   - 'INSERT INTO': 'query_language/insert_into.md'
   - 'CREATE': 'query_language/create.md'
   - 'ALTER': 'query_language/alter.md'
+  - 'SYSTEM': 'query_language/system.md'
+  - 'SYSTEM': 'query_language/show.md'
   - 'Other Kinds of Queries': 'query_language/misc.md'
   - 'Functions':
     - 'Introduction': 'query_language/functions/index.md'
@@ -153,6 +160,8 @@ nav:
     - 'mysql': 'query_language/table_functions/mysql.md'
     - 'jdbc': 'query_language/table_functions/jdbc.md'
     - 'odbc': 'query_language/table_functions/odbc.md'
+    - 'hdfs': 'query_language/table_functions/hdfs.md'
+    - 'input': 'query_language/table_functions/input.md'   
   - 'Dictionaries':
     - 'Introduction': 'query_language/dicts/index.md'
     - 'External Dictionaries':
@@ -187,6 +196,7 @@ nav:
     - 'Restrictions on Query Complexity': 'operations/settings/query_complexity.md'
     - 'Settings': 'operations/settings/settings.md'
     - 'Settings Profiles': 'operations/settings/settings_profiles.md'
+    - 'User Settings': 'operations/settings/settings_users.md'
     - 'Constraints on Settings': 'operations/settings/constraints_on_settings.md'
   - 'Utilities':
     - 'Overview': 'operations/utils/index.md'

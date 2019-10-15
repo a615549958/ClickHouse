@@ -59,6 +59,7 @@
 #include <Parsers/parseQuery.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/InterpreterSetQuery.h>
+#include <Interpreters/ReplaceQueryParameterVisitor.h>
 #include <Client/Connection.h>
 #include <Common/InterruptListener.h>
 #include <Functions/registerFunctions.h>
@@ -66,6 +67,7 @@
 #include <Common/Config/configReadClient.h>
 #include <Storages/ColumnsDescription.h>
 #include <common/argsToConfig.h>
+#include <Common/TerminalSize.h>
 
 #if USE_READLINE
 #include "Suggest.h"
@@ -104,6 +106,7 @@ namespace ErrorCodes
     extern const int CANNOT_SET_SIGNAL_HANDLER;
     extern const int CANNOT_READLINE;
     extern const int SYSTEM_ERROR;
+    extern const int INVALID_USAGE_OF_INPUT;
 }
 
 
@@ -129,7 +132,7 @@ private:
     bool print_time_to_stderr = false;   /// Output execution time to stderr in batch mode.
     bool stdin_is_not_tty = false;       /// stdin is not a terminal.
 
-    winsize terminal_size {};            /// Terminal size is needed to render progress bar.
+    uint16_t terminal_width = 0;         /// Terminal width is needed to render progress bar.
 
     std::unique_ptr<Connection> connection;    /// Connection to DB.
     String query_id;                     /// Current query_id.
@@ -202,6 +205,9 @@ private:
     /// External tables info.
     std::list<ExternalTable> external_tables;
 
+    /// Dictionary with query parameters for prepared statements.
+    NameToNameMap query_parameters;
+
     ConnectionParameters connection_parameters;
 
     void initialize(Poco::Util::Application & self)
@@ -214,7 +220,9 @@ private:
 
         configReadClient(config(), home_path);
 
+        context.makeGlobalContext();
         context.setApplicationType(Context::ApplicationType::CLIENT);
+        context.setQueryParameters(query_parameters);
 
         /// settings and limits could be specified in config file, but passed settings has higher priority
         for (auto && setting : context.getSettingsRef())
@@ -425,8 +433,14 @@ private:
             /// Load command history if present.
             if (config().has("history_file"))
                 history_file = config().getString("history_file");
-            else if (!home_path.empty())
-                history_file = home_path + "/.clickhouse-client-history";
+            else
+            {
+                auto history_file_from_env = getenv("CLICKHOUSE_HISTORY_FILE");
+                if (history_file_from_env)
+                    history_file = history_file_from_env;
+                else if (!home_path.empty())
+                    history_file = home_path + "/.clickhouse-client-history";
+            }
 
             if (!history_file.empty())
             {
@@ -550,9 +564,17 @@ private:
         if (is_interactive)
         {
             std::cout << "Connected to " << server_name
-                      << " server version " << server_version
-                      << " revision " << server_revision
-                      << "." << std::endl << std::endl;
+                << " server version " << server_version
+                << " revision " << server_revision
+                << "." << std::endl << std::endl;
+
+            if (std::make_tuple(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
+                < std::make_tuple(server_version_major, server_version_minor, server_version_patch))
+            {
+                std::cout << "ClickHouse client version is older than ClickHouse server. "
+                    << "It may lack support for new features."
+                    << std::endl << std::endl;
+            }
         }
     }
 
@@ -602,6 +624,7 @@ private:
 
             if (!ends_with_backslash && (ends_with_semicolon || has_vertical_output_suffix || (!config().has("multiline") && !hasDataInSTDIN())))
             {
+                // TODO: should we do sensitive data masking on client too? History file can be source of secret leaks.
                 if (input != prev_input)
                 {
                     /// Replace line breaks with spaces to prevent the following problem.
@@ -666,7 +689,7 @@ private:
         String text;
 
         if (config().has("query"))
-            text = config().getString("query");
+            text = config().getRawString("query");  /// Poco configuration should not process substitutions in form of ${...} inside query.
         else
         {
             /// If 'query' parameter is not set, read a query from stdin.
@@ -706,7 +729,7 @@ private:
                     if (ignore_error)
                     {
                         Tokens tokens(begin, end);
-                        TokenIterator token_iterator(tokens);
+                        IParser::Pos token_iterator(tokens);
                         while (token_iterator->type != TokenType::Semicolon && token_iterator.isValid())
                             ++token_iterator;
                         begin = token_iterator->end;
@@ -795,7 +818,6 @@ private:
         /// Some parts of a query (result output and formatting) are executed client-side.
         /// Thus we need to parse the query.
         parsed_query = parsed_query_;
-
         if (!parsed_query)
         {
             const char * begin = query.data();
@@ -831,9 +853,17 @@ private:
 
             connection->forceConnected(connection_parameters.timeouts);
 
-            /// INSERT query for which data transfer is needed (not an INSERT SELECT) is processed separately.
-            if (insert && !insert->select)
+            ASTPtr input_function;
+            if (insert && insert->select)
+                insert->tryFindInputFunction(input_function);
+
+            /// INSERT query for which data transfer is needed (not an INSERT SELECT or input()) is processed separately.
+            if (insert && (!insert->select || input_function))
+            {
+                if (input_function && insert->format.empty())
+                    throw Exception("FORMAT must be specified for function input()", ErrorCodes::INVALID_USAGE_OF_INPUT);
                 processInsertQuery();
+            }
             else
                 processOrdinaryQuery();
         }
@@ -900,6 +930,16 @@ private:
     /// Process the query that doesn't require transferring data blocks to the server.
     void processOrdinaryQuery()
     {
+        /// We will always rewrite query (even if there are no query_parameters) because it will help to find errors in query formatter.
+        {
+            /// Replace ASTQueryParameter with ASTLiteral for prepared statements.
+            ReplaceQueryParameterVisitor visitor(query_parameters);
+            visitor.visit(parsed_query);
+
+            /// Get new query after substitutions. Note that it cannot be done for INSERT query with embedded data.
+            query = serializeAST(*parsed_query);
+        }
+
         connection->sendQuery(connection_parameters.timeouts, query, query_id, QueryProcessingStage::Complete, &context.getSettingsRef(), nullptr, true);
         sendExternalTables();
         receiveResult();
@@ -1012,13 +1052,17 @@ private:
         while (true)
         {
             Block block = async_block_input->read();
-            connection->sendData(block);
-            processed_rows += block.rows();
 
             /// Check if server send Log packet
+            receiveLogs();
+
+            /// Check if server send Exception packet
             auto packet_type = connection->checkPacket();
-            if (packet_type && *packet_type == Protocol::Server::Log)
-                receiveAndProcessPacket();
+            if (packet_type && *packet_type == Protocol::Server::Exception)
+                return;
+
+            connection->sendData(block);
+            processed_rows += block.rows();
 
             if (!block)
                 break;
@@ -1235,6 +1279,17 @@ private:
         }
     }
 
+    /// Process Log packets, used when inserting data by blocks
+    void receiveLogs()
+    {
+        auto packet_type = connection->checkPacket();
+
+        while (packet_type && *packet_type == Protocol::Server::Log)
+        {
+            receiveAndProcessPacket();
+            packet_type = connection->checkPacket();
+        }
+    }
 
     void initBlockOutputStream(const Block & block)
     {
@@ -1451,7 +1506,7 @@ private:
 
                 if (show_progress_bar)
                 {
-                    ssize_t width_of_progress_bar = static_cast<ssize_t>(terminal_size.ws_col) - written_progress_chars - strlen(" 99%");
+                    ssize_t width_of_progress_bar = static_cast<ssize_t>(terminal_width) - written_progress_chars - strlen(" 99%");
                     if (width_of_progress_bar > 0)
                     {
                         std::string bar = UnicodeBar::render(UnicodeBar::getWidth(progress.read_rows, 0, total_rows_corrected, width_of_progress_bar));
@@ -1548,7 +1603,8 @@ public:
         /** We allow different groups of arguments:
           * - common arguments;
           * - arguments for any number of external tables each in form "--external args...",
-          *   where possible args are file, name, format, structure, types.
+          *   where possible args are file, name, format, structure, types;
+          * - param arguments for prepared statements.
           * Split these groups before processing.
           */
         using Arguments = std::vector<std::string>;
@@ -1597,28 +1653,43 @@ public:
             else
             {
                 in_external_group = false;
-                common_arguments.emplace_back(arg);
+
+                /// Parameter arg after underline.
+                if (startsWith(arg, "--param_"))
+                {
+                    const char * param_continuation = arg + strlen("--param_");
+                    const char * equal_pos = strchr(param_continuation, '=');
+
+                    if (equal_pos == param_continuation)
+                        throw Exception("Parameter name cannot be empty", ErrorCodes::BAD_ARGUMENTS);
+
+                    if (equal_pos)
+                    {
+                        /// param_name=value
+                        query_parameters.emplace(String(param_continuation, equal_pos), String(equal_pos + 1));
+                    }
+                    else
+                    {
+                        /// param_name value
+                        ++arg_num;
+                        arg = argv[arg_num];
+                        query_parameters.emplace(String(param_continuation), String(arg));
+                    }
+                }
+                else
+                    common_arguments.emplace_back(arg);
             }
         }
 
         stdin_is_not_tty = !isatty(STDIN_FILENO);
 
+        if (!stdin_is_not_tty)
+            terminal_width = getTerminalWidth();
+
         namespace po = boost::program_options;
 
-        unsigned line_length = po::options_description::m_default_line_length;
-        unsigned min_description_length = line_length / 2;
-        if (!stdin_is_not_tty)
-        {
-            if (ioctl(STDIN_FILENO, TIOCGWINSZ, &terminal_size))
-                throwFromErrno("Cannot obtain terminal window size (ioctl TIOCGWINSZ)", ErrorCodes::SYSTEM_ERROR);
-            line_length = std::max(
-                static_cast<unsigned>(strlen("--http_native_compression_disable_checksumming_on_decompress ")),
-                static_cast<unsigned>(terminal_size.ws_col));
-            min_description_length = std::min(min_description_length, line_length - 2);
-        }
-
         /// Main commandline options related to client functionality and all parameters from Settings.
-        po::options_description main_description("Main options", line_length, min_description_length);
+        po::options_description main_description = createOptionsDescription("Main options", terminal_width);
         main_description.add_options()
             ("help", "produce help message")
             ("config-file,C", po::value<std::string>(), "config-file path")
@@ -1633,7 +1704,7 @@ public:
               * the "\n" is used to distinguish this case because there is hardly a chance an user would use "\n"
               * as the password.
               */
-            ("password", po::value<std::string>()->implicit_value("\n"), "password")
+            ("password", po::value<std::string>()->implicit_value("\n", ""), "password")
             ("ask-password", "ask-password")
             ("query_id", po::value<std::string>(), "query_id")
             ("query,q", po::value<std::string>(), "query")
@@ -1664,7 +1735,7 @@ public:
         context.getSettingsRef().addProgramOptions(main_description);
 
         /// Commandline options related to external tables.
-        po::options_description external_description("External tables options");
+        po::options_description external_description = createOptionsDescription("External tables options", terminal_width);
         external_description.add_options()
             ("file", po::value<std::string>(), "data file or - for stdin")
             ("name", po::value<std::string>()->default_value("_data"), "name of the table")
@@ -1672,6 +1743,7 @@ public:
             ("structure", po::value<std::string>(), "structure")
             ("types", po::value<std::string>(), "types")
         ;
+
         /// Parse main commandline options.
         po::parsed_options parsed = po::command_line_parser(common_arguments).options(main_description).run();
         po::variables_map options;
@@ -1696,6 +1768,7 @@ public:
         {
             std::cout << main_description << "\n";
             std::cout << external_description << "\n";
+            std::cout << "In addition, --param_name=value can be specified for substitution of parameters for parametrized queries.\n";
             exit(0);
         }
 

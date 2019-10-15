@@ -62,6 +62,10 @@ nav:
     - 'IPv4': 'data_types/domains/ipv4.md'
     - 'IPv6': 'data_types/domains/ipv6.md'
 
+- 'Движки баз данных':
+    - 'Введение': 'database_engines/index.md'
+    - 'MySQL': 'database_engines/mysql.md'
+
 - 'Движки таблиц':
   - 'Введение': 'operations/table_engines/index.md'
   - 'Семейство MergeTree':
@@ -82,6 +86,9 @@ nav:
   - 'Интеграции':
     - 'Kafka': 'operations/table_engines/kafka.md'
     - 'MySQL': 'operations/table_engines/mysql.md'
+    - 'JDBC': 'operations/table_engines/jdbc.md'
+    - 'ODBC': 'operations/table_engines/odbc.md'
+    - 'HDFS': 'operations/table_engines/hdfs.md'
   - 'Особые':
     - 'Distributed': 'operations/table_engines/distributed.md'
     - 'Внешние данные': 'operations/table_engines/external_data.md'
@@ -96,8 +103,6 @@ nav:
     - 'MaterializedView': 'operations/table_engines/materializedview.md'
     - 'Memory': 'operations/table_engines/memory.md'
     - 'Buffer': 'operations/table_engines/buffer.md'
-    - 'JDBC': 'operations/table_engines/jdbc.md'
-    - 'ODBC': 'operations/table_engines/odbc.md'
 
 - 'Справка по SQL':
   - 'hidden': 'query_language/index.md'
@@ -105,6 +110,7 @@ nav:
   - 'INSERT INTO': 'query_language/insert_into.md'
   - 'CREATE': 'query_language/create.md'
   - 'ALTER': 'query_language/alter.md'
+  - 'SYSTEM': 'query_language/system.md'
   - 'Прочие виды запросов': 'query_language/misc.md'
   - 'Функции':
     - 'Введение': 'query_language/functions/index.md'
@@ -154,6 +160,8 @@ nav:
     - 'mysql': 'query_language/table_functions/mysql.md'
     - 'jdbc': 'query_language/table_functions/jdbc.md'
     - 'odbc': 'query_language/table_functions/odbc.md'
+    - 'hdfs': 'query_language/table_functions/hdfs.md'    
+    - 'input': 'query_language/table_functions/input.md'
   - 'Словари':
     - 'Введение': 'query_language/dicts/index.md'
     - 'Внешние словари':
@@ -189,6 +197,7 @@ nav:
     - 'Настройки': 'operations/settings/settings.md'
     - 'Ограничения на изменение настроек': 'operations/settings/constraints_on_settings.md'
     - 'Профили настроек': 'operations/settings/settings_profiles.md'
+    - 'Настройки пользователей': 'operations/settings/settings_users.md'
   - 'Утилиты':
     - 'Введение': 'operations/utils/index.md'
     - 'clickhouse-copier': 'operations/utils/clickhouse-copier.md'
@@ -202,6 +211,7 @@ nav:
   - 'Обзор архитектуры ClickHouse': 'development/architecture.md'
   - 'Как собрать ClickHouse на Linux': 'development/build.md'
   - 'Как собрать ClickHouse на Mac OS X': 'development/build_osx.md'
+  - 'Как собрать ClickHouse на Linux для Mac OS X': 'development/build_cross.md'
   - 'Как писать код на C++': 'development/style.md'
   - 'Как запустить тесты': 'development/tests.md'
   - 'Сторонние библиотеки': 'development/contrib.md'

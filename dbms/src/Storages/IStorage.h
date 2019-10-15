@@ -8,6 +8,10 @@
 #include <Storages/IStorage_fwd.h>
 #include <Storages/SelectQueryInfo.h>
 #include <Storages/TableStructureLockHolder.h>
+#include <Storages/CheckResults.h>
+#include <Storages/ColumnsDescription.h>
+#include <Storages/IndicesDescription.h>
+#include <Storages/ConstraintsDescription.h>
 #include <Common/ActionLock.h>
 #include <Common/Exception.h>
 #include <Common/RWLock.h>
@@ -21,7 +25,6 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int TABLE_IS_DROPPED;
     extern const int NOT_IMPLEMENTED;
 }
 
@@ -32,11 +35,26 @@ using StorageActionBlockType = size_t;
 class ASTCreateQuery;
 
 struct Settings;
+struct SettingChange;
+using SettingsChanges = std::vector<SettingChange>;
 
 class AlterCommands;
 class MutationCommands;
 class PartitionCommands;
 
+struct ColumnSize
+{
+    size_t marks = 0;
+    size_t data_compressed = 0;
+    size_t data_uncompressed = 0;
+
+    void add(const ColumnSize & other)
+    {
+        marks += other.marks;
+        data_compressed += other.data_compressed;
+        data_uncompressed += other.data_uncompressed;
+    }
+};
 
 /** Storage. Describes the table. Responsible for
   * - storage of the table data;
@@ -49,7 +67,7 @@ class IStorage : public std::enable_shared_from_this<IStorage>
 {
 public:
     IStorage() = default;
-    explicit IStorage(ColumnsDescription columns_);
+    explicit IStorage(ColumnsDescription virtuals_);
 
     virtual ~IStorage() = default;
     IStorage(const IStorage &) = delete;
@@ -60,7 +78,7 @@ public:
 
     /// The name of the table.
     virtual std::string getTableName() const = 0;
-    virtual std::string getDatabaseName() const { return {}; }  // FIXME: should be an abstract method!
+    virtual std::string getDatabaseName() const { return {}; }
 
     /// Returns true if the storage receives data from a remote server or servers.
     virtual bool isRemote() const { return false; }
@@ -80,26 +98,36 @@ public:
     /// Returns true if the storage supports deduplication of inserted data blocks.
     virtual bool supportsDeduplication() const { return false; }
 
+    /// Returns true if the storage supports settings.
+    virtual bool supportsSettings() const { return false; }
+
+    /// Optional size information of each physical column.
+    /// Currently it's only used by the MergeTree family for query optimizations.
+    using ColumnSizeByName = std::unordered_map<std::string, ColumnSize>;
+    virtual ColumnSizeByName getColumnSizes() const { return {}; }
 
 public: /// thread-unsafe part. lockStructure must be acquired
-    const ColumnsDescription & getColumns() const;
-    void setColumns(ColumnsDescription columns_);
-
+    virtual const ColumnsDescription & getColumns() const; /// returns combined set of columns
+    virtual void setColumns(ColumnsDescription columns_); /// sets only real columns, possibly overwrites virtual ones.
+    const ColumnsDescription & getVirtuals() const;
     const IndicesDescription & getIndices() const;
-    void setIndices(IndicesDescription indices_);
+
+    const ConstraintsDescription & getConstraints() const;
+    void setConstraints(ConstraintsDescription constraints_);
 
     /// NOTE: these methods should include virtual columns,
     ///       but should NOT include ALIAS columns (they are treated separately).
     virtual NameAndTypePair getColumn(const String & column_name) const;
     virtual bool hasColumn(const String & column_name) const;
 
-    Block getSampleBlock() const;
-    Block getSampleBlockNonMaterialized() const;
-    Block getSampleBlockForColumns(const Names & column_names) const; /// including virtual and alias columns.
+    Block getSampleBlock() const; /// ordinary + materialized.
+    Block getSampleBlockWithVirtuals() const; /// ordinary + materialized + virtuals.
+    Block getSampleBlockNonMaterialized() const; /// ordinary.
+    Block getSampleBlockForColumns(const Names & column_names) const; /// ordinary + materialized + aliases + virtuals.
 
     /// Verify that all the requested names are in the table and are set correctly:
     /// list of names is not empty and the names do not repeat.
-    void check(const Names & column_names) const;
+    void check(const Names & column_names, bool include_virtuals = false) const;
 
     /// Check that all the requested names are in the table and have the correct types.
     void check(const NamesAndTypesList & columns) const;
@@ -112,9 +140,24 @@ public: /// thread-unsafe part. lockStructure must be acquired
     /// If |need_all| is set, then checks that all the columns of the table are in the block.
     void check(const Block & block, bool need_all = false) const;
 
+    /// Check storage has setting and setting can be modified.
+    virtual void checkSettingCanBeChanged(const String & setting_name) const;
+
+protected: /// still thread-unsafe part.
+    void setIndices(IndicesDescription indices_);
+
+    /// Returns whether the column is virtual - by default all columns are real.
+    /// Initially reserved virtual column name may be shadowed by real column.
+    virtual bool isVirtualColumn(const String & column_name) const;
+
+    /// Returns modifier of settings in storage definition
+    IDatabase::ASTModifier getSettingsModifier(const SettingsChanges & new_changes) const;
+
 private:
-    ColumnsDescription columns;
+    ColumnsDescription columns; /// combined real and virtual columns
+    const ColumnsDescription virtuals = {};
     IndicesDescription indices;
+    ConstraintsDescription constraints;
 
 public:
     /// Acquire this lock if you need the table structure to remain constant during the execution of
@@ -143,6 +186,36 @@ public:
       *  for example, the request can be partially processed on a remote server.)
       */
     virtual QueryProcessingStage::Enum getQueryProcessingStage(const Context &) const { return QueryProcessingStage::FetchColumns; }
+
+    /** Watch live changes to the table.
+     * Accepts a list of columns to read, as well as a description of the query,
+     *  from which information can be extracted about how to retrieve data
+     *  (indexes, locks, etc.)
+     * Returns a stream with which you can read data sequentially
+     *  or multiple streams for parallel data reading.
+     * The `processed_stage` info is also written to what stage the request was processed.
+     * (Normally, the function only reads the columns from the list, but in other cases,
+     *  for example, the request can be partially processed on a remote server.)
+     *
+     * context contains settings for one query.
+     * Usually Storage does not care about these settings, since they are used in the interpreter.
+     * But, for example, for distributed query processing, the settings are passed to the remote server.
+     *
+     * num_streams - a recommendation, how many streams to return,
+     *  if the storage can return a different number of streams.
+     *
+     * It is guaranteed that the structure of the table will not change over the lifetime of the returned streams (that is, there will not be ALTER, RENAME and DROP).
+     */
+    virtual BlockInputStreams watch(
+        const Names & /*column_names*/,
+        const SelectQueryInfo & /*query_info*/,
+        const Context & /*context*/,
+        QueryProcessingStage::Enum & /*processed_stage*/,
+        size_t /*max_block_size*/,
+        unsigned /*num_streams*/)
+    {
+        throw Exception("Method watch is not supported by storage " + getName(), ErrorCodes::NOT_IMPLEMENTED);
+    }
 
     /** Read a set of columns from the table.
       * Accepts a list of columns to read, as well as a description of the query,
@@ -190,12 +263,12 @@ public:
       * The table is not usable during and after call to this method.
       * If you do not need any action other than deleting the directory with data, you can leave this method blank.
       */
-    virtual void drop() {}
+    virtual void drop(TableStructureWriteLockHolder &) {}
 
     /** Clear the table data and leave it empty.
       * Must be called under lockForAlter.
       */
-    virtual void truncate(const ASTPtr & /*query*/, const Context & /* context */)
+    virtual void truncate(const ASTPtr & /*query*/, const Context & /* context */, TableStructureWriteLockHolder &)
     {
         throw Exception("Truncate is not supported by storage " + getName(), ErrorCodes::NOT_IMPLEMENTED);
     }
@@ -205,7 +278,8 @@ public:
       * In this function, you need to rename the directory with the data, if any.
       * Called when the table structure is locked for write.
       */
-    virtual void rename(const String & /*new_path_to_db*/, const String & /*new_database_name*/, const String & /*new_table_name*/)
+    virtual void rename(const String & /*new_path_to_db*/, const String & /*new_database_name*/, const String & /*new_table_name*/,
+                        TableStructureWriteLockHolder &)
     {
         throw Exception("Method rename is not supported by storage " + getName(), ErrorCodes::NOT_IMPLEMENTED);
     }
@@ -214,7 +288,7 @@ public:
       * This method must fully execute the ALTER query, taking care of the locks itself.
       * To update the table metadata on disk, this method should call InterpreterAlterQuery::updateMetadata.
       */
-    virtual void alter(const AlterCommands & params, const String & database_name, const String & table_name, const Context & context, TableStructureWriteLockHolder & table_lock_holder);
+    virtual void alter(const AlterCommands & params, const Context & context, TableStructureWriteLockHolder & table_lock_holder);
 
     /** ALTER tables with regard to its partitions.
       * Should handle locks for each command on its own.
@@ -268,7 +342,7 @@ public:
         return {};
     }
 
-    bool is_dropped{false};
+    std::atomic<bool> is_dropped{false};
 
     /// Does table support index for IN sections
     virtual bool supportsIndexForIn() const { return false; }
@@ -277,7 +351,7 @@ public:
     virtual bool mayBenefitFromIndexForIn(const ASTPtr & /* left_in_operand */, const Context & /* query_context */) const { return false; }
 
     /// Checks validity of the data
-    virtual bool checkData() const { throw Exception("Check query is not supported for " + getName() + " storage", ErrorCodes::NOT_IMPLEMENTED); }
+    virtual CheckResults checkData(const ASTPtr & /* query */, const Context & /* context */) { throw Exception("Check query is not supported for " + getName() + " storage", ErrorCodes::NOT_IMPLEMENTED); }
 
     /// Checks that table could be dropped right now
     /// Otherwise - throws an exception with detailed information.
@@ -292,8 +366,8 @@ public:
     /** Notify engine about updated dependencies for this storage. */
     virtual void updateDependencies() {}
 
-    /// Returns data path if storage supports it, empty string otherwise.
-    virtual String getDataPath() const { return {}; }
+    /// Returns data paths if storage supports it, empty vector otherwise.
+    virtual Strings getDataPaths() const { return {}; }
 
     /// Returns ASTExpressionList of partition key expression for storage or nullptr if there is none.
     virtual ASTPtr getPartitionKeyAST() const { return nullptr; }
@@ -322,11 +396,11 @@ public:
     /// Returns additional columns that need to be read for FINAL to work.
     virtual Names getColumnsRequiredForFinal() const { return {}; }
 
-protected:
-    /// Returns whether the column is virtual - by default all columns are real.
-    /// Initially reserved virtual column name may be shadowed by real column.
-    /// Returns false even for non-existent non-virtual columns.
-    virtual bool isVirtualColumn(const String & /* column_name */) const { return false; }
+    /// Returns names of primary key + secondary sorting columns
+    virtual Names getSortingKeyColumns() const { return {}; }
+
+    /// Returns storage policy if storage supports it
+    virtual DiskSpace::StoragePolicyPtr getStoragePolicy() const { return {}; }
 
 private:
     /// You always need to take the next three locks in this order.

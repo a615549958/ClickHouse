@@ -34,7 +34,7 @@ struct AggregateIndependent
     {
         results.reserve(num_threads);
         for (size_t i = 0; i < num_threads; ++i)
-            results.emplace_back(new Map);
+            results.emplace_back(std::make_unique<Map>());
 
         for (size_t i = 0; i < num_threads; ++i)
         {
@@ -46,14 +46,14 @@ struct AggregateIndependent
             {
                 for (auto it = begin; it != end; ++it)
                 {
-                    typename Map::iterator place;
+                    typename Map::LookupResult place;
                     bool inserted;
                     map.emplace(*it, place, inserted);
 
                     if (inserted)
-                        creator(place->getSecond());
+                        creator(*lookupResultGetMapped(place));
                     else
-                        updater(place->getSecond());
+                        updater(*lookupResultGetMapped(place));
                 }
             });
         }
@@ -77,7 +77,7 @@ struct AggregateIndependentWithSequentialKeysOptimization
     {
         results.reserve(num_threads);
         for (size_t i = 0; i < num_threads; ++i)
-            results.emplace_back(new Map);
+            results.emplace_back(std::make_unique<Map>());
 
         for (size_t i = 0; i < num_threads; ++i)
         {
@@ -87,13 +87,13 @@ struct AggregateIndependentWithSequentialKeysOptimization
 
             pool.schedule([&, begin, end]()
             {
-                typename Map::iterator place;
+                typename Map::LookupResult place = nullptr;
                 Key prev_key {};
                 for (auto it = begin; it != end; ++it)
                 {
                     if (it != begin && *it == prev_key)
                     {
-                        updater(place->getSecond());
+                        updater(*lookupResultGetMapped(place));
                         continue;
                     }
                     prev_key = *it;
@@ -102,9 +102,9 @@ struct AggregateIndependentWithSequentialKeysOptimization
                     map.emplace(*it, place, inserted);
 
                     if (inserted)
-                        creator(place->getSecond());
+                        creator(*lookupResultGetMapped(place));
                     else
-                        updater(place->getSecond());
+                        updater(*lookupResultGetMapped(place));
                 }
             });
         }
